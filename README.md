@@ -9,8 +9,8 @@ Built on [prodjlink-rs](https://github.com/anweiss/prodjlink-rs) and [ableton-li
 BeatBridge joins a Pioneer DJ Link network as a virtual CDJ, listens for tempo/beat/transport events, and relays them to the Ableton Link session. This lets you sync:
 
 - **CDJs → Ableton Live** (or any Link app) — DJs control the tempo, Link follows ✅
-- **Link → CDJs** — Link apps control the tempo, CDJs follow *(detection implemented; relay pending prodjlink-rs send API)*
-- **Bidirectional** — CDJ→Link fully functional; Link→CDJ direction pending *(same as above)*
+- **Link → CDJs** — Link apps control the tempo, CDJs follow via tempo master + fader start ✅
+- **Bidirectional** — Both directions active, last writer wins with echo-guard suppression ✅
 
 ### Use Cases
 
@@ -75,11 +75,11 @@ The DJ controls tempo. BeatBridge listens for beats from the Pro DJ Link tempo m
 
 ### Slave (Link→CDJ)
 
-Link controls tempo. BeatBridge polls the Link session and detects tempo/transport changes. Full relay to CDJs is pending the addition of a send-side API in prodjlink-rs.
+Link controls tempo. BeatBridge claims tempo master on the DJ Link network, then relays Link tempo changes via status broadcasts and transport changes via fader-start commands to CDJs on channels 1–4. CDJs in sync mode will follow the Link tempo.
 
 ### Bidirectional
 
-CDJ→Link direction is fully functional. Link→CDJ direction detects changes but relay is pending (same as slave). Uses a 100ms echo guard to prevent feedback loops. Last change wins.
+Both directions active — last writer wins. CDJ beats push tempo into Link; Link tempo changes push back to CDJs. Uses a 100ms echo guard to prevent feedback loops.
 
 ## Status Display
 

@@ -4,7 +4,7 @@ use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
 use ableton_link_rs::link::BasicLink;
-use prodjlink_rs::{BeatEvent, DeviceType, DeviceUpdate, ProDjLink};
+use prodjlink_rs::{BeatEvent, Bpm, DeviceNumber, DeviceType, DeviceUpdate, ProDjLink};
 
 use crate::config::SyncMode;
 
@@ -99,13 +99,18 @@ impl BridgeEngine {
 
         // Warn about modes that aren't fully functional yet
         match self.sync_mode {
-            SyncMode::Slave => {
-                warn!("Slave mode: Link → CDJ relay requires prodjlink-rs send API (not yet available). \
-                       Bridge will monitor Link tempo changes but cannot command CDJs.");
-            }
-            SyncMode::Bidirectional => {
-                warn!("Bidirectional mode: Link → CDJ direction requires prodjlink-rs send API (not yet available). \
-                       CDJ → Link direction is fully functional.");
+            SyncMode::Slave | SyncMode::Bidirectional => {
+                // Enable status broadcasting so CDJs see our tempo/master state
+                let vcdj = pdl.virtual_cdj();
+                vcdj.set_sending_status(true).await;
+
+                // Claim tempo master and set initial BPM from Link
+                let initial_bpm = link.capture_app_session_state().tempo();
+                if let Err(e) = vcdj.request_master_role(Bpm(initial_bpm)).await {
+                    warn!("Failed to claim master role: {e}. CDJs may not follow tempo changes.");
+                } else {
+                    info!(bpm = initial_bpm, "Claimed tempo master on DJ Link network");
+                }
             }
             SyncMode::Master => {}
         }
@@ -244,15 +249,21 @@ impl BridgeEngine {
                     if should_sync_tempo(last_link_bpm, link_bpm) {
                         debug!(bpm = link_bpm, "link tempo changed, relaying to CDJs");
                         last_link_bpm = link_bpm;
-                        // TODO: relay tempo to CDJs once prodjlink-rs exposes
-                        // VirtualCdj::set_master_tempo() or similar API
+                        let vcdj = pdl.virtual_cdj();
+                        vcdj.set_tempo(Bpm(link_bpm));
                     }
 
                     if playing != last_playing {
                         debug!(playing, "link play state changed, relaying to CDJs");
                         last_playing = playing;
-                        // TODO: relay play/stop to CDJs via fader-start commands
-                        // once prodjlink-rs exposes the send-side API
+                        let vcdj = pdl.virtual_cdj();
+                        vcdj.set_playing(playing);
+                        // Send fader start/stop to CDJs on channels 1-4
+                        for ch in 1..=4u8 {
+                            if let Err(e) = vcdj.fader_start(DeviceNumber(ch), playing).await {
+                                debug!(channel = ch, error = %e, "fader_start failed");
+                            }
+                        }
                     }
 
                     self.publish_state(&pdl, &link);
@@ -368,7 +379,8 @@ impl BridgeEngine {
                         debug!(bpm = link_bpm, "bidir: Link tempo → CDJs");
                         prev_link_bpm = link_bpm;
                         last_link_to_cdj = Instant::now();
-                        // TODO: relay to CDJs once send API available
+                        let vcdj = pdl.virtual_cdj();
+                        vcdj.set_tempo(Bpm(link_bpm));
                     }
 
                     self.publish_state(&pdl, &link);
