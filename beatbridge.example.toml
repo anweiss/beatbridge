@@ -1,0 +1,24 @@
+# BeatBridge Configuration
+# Copy to beatbridge.toml and customize
+
+# Network interface IP for Pro DJ Link (auto-detect if omitted)
+# interface = "192.168.1.100"
+
+# Virtual CDJ identity on the DJ Link network
+device_name = "beatbridge"
+device_number = 5
+
+# Ableton Link quantum (beats per phase)
+quantum = 4.0
+
+# Sync mode: "master" (CDJ→Link), "slave" (Link→CDJ), "bidirectional"
+sync_mode = "master"
+
+# Initial BPM for Link when no CDJ is connected
+initial_bpm = 120.0
+
+# Console status refresh interval (ms)
+status_interval_ms = 500
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"

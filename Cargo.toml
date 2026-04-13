@@ -1,0 +1,17 @@
+[package]
+name = "beatbridge"
+version = "0.1.0"
+edition = "2024"
+description = "Bridge between Pioneer Pro DJ Link and Ableton Link — sync tempo, phase, and transport between CDJs/mixers and any Link-enabled application"
+license = "MIT"
+
+[dependencies]
+prodjlink-rs = { path = "../prodjlink-rs" }
+ableton-link-rs = { path = "../ableton-link-rs" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
