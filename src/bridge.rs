@@ -4,7 +4,7 @@ use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
 use ableton_link_rs::link::BasicLink;
-use prodjlink_rs::{BeatEvent, DeviceUpdate, ProDjLink};
+use prodjlink_rs::{BeatEvent, DeviceType, DeviceUpdate, ProDjLink};
 
 use crate::config::SyncMode;
 
@@ -96,6 +96,20 @@ impl BridgeEngine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         link.enable().await;
         link.enable_start_stop_sync(true);
+
+        // Warn about modes that aren't fully functional yet
+        match self.sync_mode {
+            SyncMode::Slave => {
+                warn!("Slave mode: Link → CDJ relay requires prodjlink-rs send API (not yet available). \
+                       Bridge will monitor Link tempo changes but cannot command CDJs.");
+            }
+            SyncMode::Bidirectional => {
+                warn!("Bidirectional mode: Link → CDJ direction requires prodjlink-rs send API (not yet available). \
+                       CDJ → Link direction is fully functional.");
+            }
+            SyncMode::Master => {}
+        }
+
         info!(
             mode = ?self.sync_mode,
             quantum = self.quantum,
@@ -134,11 +148,16 @@ impl BridgeEngine {
                             if master_dev.is_some_and(|d| d == beat.device_number) {
                                 let cdj_bpm = beat.effective_tempo();
                                 Self::sync_tempo_to_link(&mut link, cdj_bpm, self.quantum).await;
-                                Self::sync_phase_to_link(
-                                    &mut link,
-                                    beat.beat_within_bar,
-                                    self.quantum,
-                                ).await;
+
+                                // Only sync phase from CDJs/players — mixer
+                                // beat_within_bar is not musically meaningful
+                                if beat.device_type != DeviceType::Mixer {
+                                    Self::sync_phase_to_link(
+                                        &mut link,
+                                        beat.beat_within_bar,
+                                        self.quantum,
+                                    ).await;
+                                }
                             }
                             self.publish_state(&pdl, &link);
                         }
@@ -214,7 +233,7 @@ impl BridgeEngine {
                     let link_bpm = session.tempo();
                     let playing = session.is_playing();
 
-                    if (link_bpm - last_link_bpm).abs() > TEMPO_EPSILON {
+                    if should_sync_tempo(last_link_bpm, link_bpm) {
                         debug!(bpm = link_bpm, "link tempo changed, relaying to CDJs");
                         last_link_bpm = link_bpm;
                         // TODO: relay tempo to CDJs once prodjlink-rs exposes
@@ -270,19 +289,27 @@ impl BridgeEngine {
                     match beat_result {
                         Ok(BeatEvent::NewBeat(beat)) => {
                             // Suppress if we recently wrote from Link → CDJ
-                            if last_link_to_cdj.elapsed().as_millis() < ECHO_GUARD_MS {
+                            if is_echo_guarded(last_link_to_cdj, ECHO_GUARD_MS) {
                                 continue;
                             }
                             let master_dev = pdl.virtual_cdj().tempo_master().master_device();
                             if master_dev.is_some_and(|d| d == beat.device_number) {
                                 let cdj_bpm = beat.effective_tempo();
                                 Self::sync_tempo_to_link(&mut link, cdj_bpm, self.quantum).await;
-                                Self::sync_phase_to_link(
-                                    &mut link,
-                                    beat.beat_within_bar,
-                                    self.quantum,
-                                ).await;
+
+                                // Only sync phase from CDJs — not mixers
+                                if beat.device_type != DeviceType::Mixer {
+                                    Self::sync_phase_to_link(
+                                        &mut link,
+                                        beat.beat_within_bar,
+                                        self.quantum,
+                                    ).await;
+                                }
+
                                 last_cdj_to_link = Instant::now();
+                                // Update prev_link_bpm to the value we just wrote,
+                                // preventing it from being re-detected as a Link change
+                                prev_link_bpm = cdj_bpm;
                             }
                             self.publish_state(&pdl, &link);
                         }
@@ -296,7 +323,7 @@ impl BridgeEngine {
                 status_result = status_rx.recv() => {
                     match status_result {
                         Ok(DeviceUpdate::Cdj(status)) => {
-                            if last_link_to_cdj.elapsed().as_millis() < ECHO_GUARD_MS {
+                            if is_echo_guarded(last_link_to_cdj, ECHO_GUARD_MS) {
                                 continue;
                             }
                             if status.is_tempo_master() {
@@ -322,13 +349,13 @@ impl BridgeEngine {
                 }
                 _ = link_poll.tick() => {
                     // Suppress if we recently wrote from CDJ → Link
-                    if last_cdj_to_link.elapsed().as_millis() < ECHO_GUARD_MS {
+                    if is_echo_guarded(last_cdj_to_link, ECHO_GUARD_MS) {
                         continue;
                     }
                     let session = link.capture_app_session_state();
                     let link_bpm = session.tempo();
 
-                    if (link_bpm - prev_link_bpm).abs() > TEMPO_EPSILON {
+                    if should_sync_tempo(prev_link_bpm, link_bpm) {
                         debug!(bpm = link_bpm, "bidir: Link tempo → CDJs");
                         prev_link_bpm = link_bpm;
                         last_link_to_cdj = Instant::now();
@@ -356,10 +383,9 @@ impl BridgeEngine {
 
     /// Push the CDJ tempo into Link if it differs beyond epsilon.
     async fn sync_tempo_to_link(link: &mut BasicLink, cdj_bpm: f64, quantum: f64) {
-        let session = link.capture_app_session_state();
-        let link_bpm = session.tempo();
+        let link_bpm = link.capture_app_session_state().tempo();
 
-        if (cdj_bpm - link_bpm).abs() > TEMPO_EPSILON {
+        if should_sync_tempo(link_bpm, cdj_bpm) {
             let time = link.clock().micros();
             let mut session = link.capture_app_session_state();
             session.set_tempo(cdj_bpm, time);
@@ -367,7 +393,7 @@ impl BridgeEngine {
             debug!(cdj_bpm, link_bpm, "tempo synced CDJ → Link");
         }
 
-        // Always re-read to get fresh phase for logging
+        // Read fresh phase for downstream logging
         let session = link.capture_app_session_state();
         let time = link.clock().micros();
         let _phase = session.phase_at_time(time, quantum);
@@ -376,11 +402,10 @@ impl BridgeEngine {
     /// Align Link phase to the CDJ beat position.
     /// CDJ `beat_within_bar` is 1-based (1–4); map to 0-based Link beat.
     async fn sync_phase_to_link(link: &mut BasicLink, beat_within_bar: u8, quantum: f64) {
-        if beat_within_bar == 0 || beat_within_bar > 4 {
+        let Some(target_beat) = map_beat_to_phase(beat_within_bar) else {
             return; // unknown bar position
-        }
+        };
 
-        let target_beat = (beat_within_bar - 1) as f64;
         let time = link.clock().micros();
         let mut session = link.capture_app_session_state();
         session.force_beat_at_time(target_beat, time, quantum);
@@ -413,9 +438,58 @@ impl BridgeEngine {
     }
 }
 
+// ------------------------------------------------------------------
+// Pure helper functions — testable without hardware
+// ------------------------------------------------------------------
+
+/// Determine whether a tempo change exceeds the epsilon threshold.
+pub fn should_sync_tempo(current_bpm: f64, new_bpm: f64) -> bool {
+    (current_bpm - new_bpm).abs() > TEMPO_EPSILON
+}
+
+/// Map a CDJ beat_within_bar (1-based, 1–4) to a 0-based Link beat position.
+/// Returns `None` for invalid values (0 or >4).
+pub fn map_beat_to_phase(beat_within_bar: u8) -> Option<f64> {
+    if beat_within_bar == 0 || beat_within_bar > 4 {
+        None
+    } else {
+        Some((beat_within_bar - 1) as f64)
+    }
+}
+
+/// Determine if the echo guard is still active.
+pub fn is_echo_guarded(last_write: Instant, guard_ms: u128) -> bool {
+    last_write.elapsed().as_millis() < guard_ms
+}
+
+/// Format the master device for display.
+pub fn format_master_device(device: Option<u8>) -> String {
+    device
+        .map(|d| format!("P{d}"))
+        .unwrap_or_else(|| "---".to_string())
+}
+
+/// Compute the drift between ProDjLink and Link tempos.
+pub fn compute_drift(prodjlink_bpm: f64, link_bpm: f64) -> f64 {
+    prodjlink_bpm - link_bpm
+}
+
+/// Format the sync indicator based on drift.
+pub fn format_sync_indicator(drift: f64) -> String {
+    if drift.abs() > 0.1 {
+        format!("⚠ drift {drift:.1}")
+    } else {
+        "✓ synced".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ================================================================
+    // BridgeEngine constructor & channels
+    // ================================================================
 
     #[test]
     fn engine_new_initial_state() {
@@ -467,7 +541,6 @@ mod tests {
         let engine = BridgeEngine::new(SyncMode::Master, 4.0, 120.0);
         let mut rx = engine.state_receiver();
 
-        // Push a new state through the watch channel
         let new_state = BridgeState {
             prodjlink_bpm: 140.0,
             link_bpm: 140.0,
@@ -494,10 +567,7 @@ mod tests {
         let shutdown = engine.shutdown_handle();
         let mut shutdown_rx = shutdown.subscribe();
 
-        // Send shutdown
         shutdown.send(()).unwrap();
-
-        // Receiver should get the signal
         let result = shutdown_rx.recv().await;
         assert!(result.is_ok());
     }
@@ -530,5 +600,191 @@ mod tests {
         assert_eq!(cloned.prodjlink_bpm, 128.0);
         assert_eq!(cloned.master_device, Some(3));
         assert!(cloned.is_playing);
+    }
+
+    #[test]
+    fn bridge_state_default() {
+        let state = BridgeState::default();
+        assert_eq!(state.prodjlink_bpm, 0.0);
+        assert_eq!(state.link_bpm, 0.0);
+        assert_eq!(state.link_peers, 0);
+        assert_eq!(state.beat_phase, 0.0);
+        assert_eq!(state.quantum, 4.0);
+        assert!(!state.is_playing);
+        assert_eq!(state.sync_mode, SyncMode::Master);
+        assert!(state.master_device.is_none());
+    }
+
+    // ================================================================
+    // Pure helper functions — tempo sync threshold
+    // ================================================================
+
+    #[test]
+    fn should_sync_tempo_above_epsilon() {
+        assert!(should_sync_tempo(128.0, 128.1));
+        assert!(should_sync_tempo(120.0, 130.0));
+    }
+
+    #[test]
+    fn should_sync_tempo_within_epsilon() {
+        assert!(!should_sync_tempo(128.0, 128.0));
+        assert!(!should_sync_tempo(128.0, 128.04));
+        assert!(!should_sync_tempo(128.0, 127.96));
+    }
+
+    #[test]
+    fn should_sync_tempo_exactly_at_epsilon() {
+        // At exactly TEMPO_EPSILON (0.05), should NOT sync (uses strict >)
+        // Use a value clearly within epsilon to avoid FP rounding
+        assert!(!should_sync_tempo(128.0, 128.049));
+        // Just above epsilon — should sync
+        assert!(should_sync_tempo(128.0, 128.06));
+    }
+
+    #[test]
+    fn should_sync_tempo_negative_diff() {
+        assert!(should_sync_tempo(130.0, 120.0));
+    }
+
+    #[test]
+    fn should_sync_tempo_zero_bpm() {
+        assert!(!should_sync_tempo(0.0, 0.0));
+        assert!(should_sync_tempo(0.0, 120.0));
+    }
+
+    // ================================================================
+    // Pure helper functions — beat-to-phase mapping
+    // ================================================================
+
+    #[test]
+    fn map_beat_to_phase_valid_beats() {
+        assert_eq!(map_beat_to_phase(1), Some(0.0));
+        assert_eq!(map_beat_to_phase(2), Some(1.0));
+        assert_eq!(map_beat_to_phase(3), Some(2.0));
+        assert_eq!(map_beat_to_phase(4), Some(3.0));
+    }
+
+    #[test]
+    fn map_beat_to_phase_zero_is_invalid() {
+        assert_eq!(map_beat_to_phase(0), None);
+    }
+
+    #[test]
+    fn map_beat_to_phase_above_four_is_invalid() {
+        assert_eq!(map_beat_to_phase(5), None);
+        assert_eq!(map_beat_to_phase(255), None);
+    }
+
+    // ================================================================
+    // Pure helper functions — echo guard
+    // ================================================================
+
+    #[test]
+    fn echo_guard_active_when_recent() {
+        let now = Instant::now();
+        // Just created — elapsed is ~0ms, guard at 100ms should be active
+        assert!(is_echo_guarded(now, 100));
+    }
+
+    #[test]
+    fn echo_guard_inactive_when_old() {
+        let old = Instant::now() - std::time::Duration::from_secs(1);
+        assert!(!is_echo_guarded(old, 100));
+    }
+
+    #[test]
+    fn echo_guard_zero_ms_never_guards() {
+        let now = Instant::now();
+        // 0ms guard means nothing is ever guarded (elapsed >= 0)
+        assert!(!is_echo_guarded(now, 0));
+    }
+
+    // ================================================================
+    // Pure helper functions — display formatting
+    // ================================================================
+
+    #[test]
+    fn format_master_device_some() {
+        assert_eq!(format_master_device(Some(1)), "P1");
+        assert_eq!(format_master_device(Some(3)), "P3");
+    }
+
+    #[test]
+    fn format_master_device_none() {
+        assert_eq!(format_master_device(None), "---");
+    }
+
+    #[test]
+    fn compute_drift_synced() {
+        assert_eq!(compute_drift(128.0, 128.0), 0.0);
+    }
+
+    #[test]
+    fn compute_drift_positive() {
+        let drift = compute_drift(130.0, 128.0);
+        assert!((drift - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compute_drift_negative() {
+        let drift = compute_drift(126.0, 128.0);
+        assert!((drift - (-2.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sync_indicator_synced() {
+        assert_eq!(format_sync_indicator(0.0), "✓ synced");
+        assert_eq!(format_sync_indicator(0.05), "✓ synced");
+        assert_eq!(format_sync_indicator(-0.1), "✓ synced");
+    }
+
+    #[test]
+    fn sync_indicator_drifting() {
+        assert_eq!(format_sync_indicator(0.2), "⚠ drift 0.2");
+        assert_eq!(format_sync_indicator(-1.5), "⚠ drift -1.5");
+    }
+
+    #[test]
+    fn sync_indicator_at_threshold() {
+        // Exactly 0.1 — should show synced (> not >=)
+        assert_eq!(format_sync_indicator(0.1), "✓ synced");
+    }
+
+    // ================================================================
+    // Multiple state updates through watch channel
+    // ================================================================
+
+    #[tokio::test]
+    async fn multiple_state_updates() {
+        let engine = BridgeEngine::new(SyncMode::Master, 4.0, 120.0);
+        let mut rx = engine.state_receiver();
+
+        // Push several updates
+        for bpm in [125.0, 130.0, 135.0] {
+            let state = BridgeState {
+                prodjlink_bpm: bpm,
+                link_bpm: bpm,
+                ..BridgeState::default()
+            };
+            engine.state_tx.send(state).unwrap();
+        }
+
+        // Watch channel only retains the latest value
+        rx.changed().await.unwrap();
+        let state = rx.borrow().clone();
+        assert_eq!(state.prodjlink_bpm, 135.0);
+    }
+
+    #[test]
+    fn multiple_shutdown_subscribers() {
+        let engine = BridgeEngine::new(SyncMode::Master, 4.0, 120.0);
+        let tx = engine.shutdown_handle();
+        let mut rx1 = tx.subscribe();
+        let mut rx2 = tx.subscribe();
+
+        tx.send(()).unwrap();
+
+        assert!(rx1.try_recv().is_ok());
+        assert!(rx2.try_recv().is_ok());
     }
 }
