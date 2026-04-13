@@ -110,6 +110,13 @@ impl BridgeEngine {
             SyncMode::Master => {}
         }
 
+        if !can_phase_sync(self.quantum) {
+            info!(
+                quantum = self.quantum,
+                "Phase sync disabled — CDJs only report 4-beat bars; quantum != 4.0"
+            );
+        }
+
         info!(
             mode = ?self.sync_mode,
             quantum = self.quantum,
@@ -147,11 +154,12 @@ impl BridgeEngine {
                             // Only sync from the tempo master player
                             if master_dev.is_some_and(|d| d == beat.device_number) {
                                 let cdj_bpm = beat.effective_tempo();
-                                Self::sync_tempo_to_link(&mut link, cdj_bpm, self.quantum).await;
+                                Self::sync_tempo_to_link(&mut link, cdj_bpm).await;
 
                                 // Only sync phase from CDJs/players — mixer
-                                // beat_within_bar is not musically meaningful
-                                if beat.device_type != DeviceType::Mixer {
+                                // beat_within_bar is not musically meaningful.
+                                // Also skip when quantum != 4 (CDJ only has 4-beat bars).
+                                if beat.device_type != DeviceType::Mixer && can_phase_sync(self.quantum) {
                                     Self::sync_phase_to_link(
                                         &mut link,
                                         beat.beat_within_bar,
@@ -295,10 +303,11 @@ impl BridgeEngine {
                             let master_dev = pdl.virtual_cdj().tempo_master().master_device();
                             if master_dev.is_some_and(|d| d == beat.device_number) {
                                 let cdj_bpm = beat.effective_tempo();
-                                Self::sync_tempo_to_link(&mut link, cdj_bpm, self.quantum).await;
+                                Self::sync_tempo_to_link(&mut link, cdj_bpm).await;
 
-                                // Only sync phase from CDJs — not mixers
-                                if beat.device_type != DeviceType::Mixer {
+                                // Only sync phase from CDJs — not mixers.
+                                // Skip when quantum != 4 (CDJ only has 4-beat bars).
+                                if beat.device_type != DeviceType::Mixer && can_phase_sync(self.quantum) {
                                     Self::sync_phase_to_link(
                                         &mut link,
                                         beat.beat_within_bar,
@@ -382,7 +391,7 @@ impl BridgeEngine {
     // ------------------------------------------------------------------
 
     /// Push the CDJ tempo into Link if it differs beyond epsilon.
-    async fn sync_tempo_to_link(link: &mut BasicLink, cdj_bpm: f64, quantum: f64) {
+    async fn sync_tempo_to_link(link: &mut BasicLink, cdj_bpm: f64) {
         let link_bpm = link.capture_app_session_state().tempo();
 
         if should_sync_tempo(link_bpm, cdj_bpm) {
@@ -392,11 +401,6 @@ impl BridgeEngine {
             link.commit_app_session_state(session).await;
             debug!(cdj_bpm, link_bpm, "tempo synced CDJ → Link");
         }
-
-        // Read fresh phase for downstream logging
-        let session = link.capture_app_session_state();
-        let time = link.clock().micros();
-        let _phase = session.phase_at_time(time, quantum);
     }
 
     /// Align Link phase to the CDJ beat position.
@@ -455,6 +459,13 @@ pub fn map_beat_to_phase(beat_within_bar: u8) -> Option<f64> {
     } else {
         Some((beat_within_bar - 1) as f64)
     }
+}
+
+/// Whether phase sync is meaningful for the given quantum.
+/// CDJs only report beat_within_bar as 1–4 (a 4-beat bar), so phase
+/// alignment is only correct when the Link quantum is also 4.
+pub fn can_phase_sync(quantum: f64) -> bool {
+    (quantum - 4.0).abs() < f64::EPSILON
 }
 
 /// Determine if the echo guard is still active.
@@ -673,6 +684,24 @@ mod tests {
     fn map_beat_to_phase_above_four_is_invalid() {
         assert_eq!(map_beat_to_phase(5), None);
         assert_eq!(map_beat_to_phase(255), None);
+    }
+
+    // ================================================================
+    // Pure helper functions — phase sync quantum check
+    // ================================================================
+
+    #[test]
+    fn can_phase_sync_quantum_four() {
+        assert!(can_phase_sync(4.0));
+    }
+
+    #[test]
+    fn can_phase_sync_quantum_not_four() {
+        assert!(!can_phase_sync(8.0));
+        assert!(!can_phase_sync(2.0));
+        assert!(!can_phase_sync(3.0));
+        assert!(!can_phase_sync(1.0));
+        assert!(!can_phase_sync(16.0));
     }
 
     // ================================================================

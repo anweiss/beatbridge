@@ -1,16 +1,16 @@
 # BeatBridge
 
-Bridge between **Pioneer Pro DJ Link** and **Ableton Link** — sync tempo, phase, and transport between CDJs/mixers and any Link-enabled application in real time.
+Bridge between **Pioneer Pro DJ Link** and **Ableton Link** — sync tempo, phase, and transport from CDJs/mixers to any Link-enabled application in real time.
 
 Built on [prodjlink-rs](https://github.com/anweiss/prodjlink-rs) and [ableton-link-rs](https://github.com/anweiss/ableton-link-rs), two native Rust implementations of their respective protocols.
 
 ## What It Does
 
-BeatBridge joins a Pioneer DJ Link network as a virtual CDJ, listens for tempo/beat/transport events, and relays them to the Ableton Link session (or vice versa). This lets you sync:
+BeatBridge joins a Pioneer DJ Link network as a virtual CDJ, listens for tempo/beat/transport events, and relays them to the Ableton Link session. This lets you sync:
 
-- **CDJs → Ableton Live** (or any Link app) — DJs control the tempo, Link follows
-- **Link → CDJs** — Link apps control the tempo, CDJs follow
-- **Bidirectional** — last change wins
+- **CDJs → Ableton Live** (or any Link app) — DJs control the tempo, Link follows ✅
+- **Link → CDJs** — Link apps control the tempo, CDJs follow *(detection implemented; relay pending prodjlink-rs send API)*
+- **Bidirectional** — CDJ→Link fully functional; Link→CDJ direction pending *(same as above)*
 
 ### Use Cases
 
@@ -75,11 +75,11 @@ The DJ controls tempo. BeatBridge listens for beats from the Pro DJ Link tempo m
 
 ### Slave (Link→CDJ)
 
-Link controls tempo. BeatBridge polls the Link session and relays tempo/transport changes back to CDJs via Pro DJ Link commands.
+Link controls tempo. BeatBridge polls the Link session and detects tempo/transport changes. Full relay to CDJs is pending the addition of a send-side API in prodjlink-rs.
 
 ### Bidirectional
 
-Both directions are active with a 100ms echo guard to prevent feedback loops. Last change wins.
+CDJ→Link direction is fully functional. Link→CDJ direction detects changes but relay is pending (same as slave). Uses a 100ms echo guard to prevent feedback loops. Last change wins.
 
 ## Status Display
 

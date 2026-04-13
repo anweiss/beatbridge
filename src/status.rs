@@ -1,9 +1,7 @@
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 
-use crate::bridge::{
-    compute_drift, format_master_device, format_sync_indicator, BridgeState,
-};
+use crate::bridge::{BridgeState, compute_drift, format_master_device, format_sync_indicator};
 use crate::config::SyncMode;
 
 /// Run the status display loop.
@@ -17,7 +15,7 @@ pub async fn run_status_display(
     let mut ticker = tokio::time::interval(interval);
 
     println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║                    B E A T B R I D G E                  ║");
+    println!("║                    B E A T B R I D G E                   ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
 
@@ -55,9 +53,17 @@ pub fn format_status_line(state: &BridgeState) -> String {
     let drift = compute_drift(state.prodjlink_bpm, state.link_bpm);
     let sync_indicator = format_sync_indicator(drift);
 
+    // Show the BPM from the active source:
+    // - Master mode: CDJ drives, so show prodjlink_bpm
+    // - Slave mode: Link drives, so show link_bpm
+    // - Bidirectional: show prodjlink_bpm (both are synced when working)
+    let display_bpm = match state.sync_mode {
+        SyncMode::Slave => state.link_bpm,
+        _ => state.prodjlink_bpm,
+    };
+
     format!(
-        "  {playing} {:.1} BPM │ {mode_icon} │ Master: {master} │ Link: {} peer{} │ Phase: {phase_bar} │ {sync_indicator}",
-        state.prodjlink_bpm,
+        "  {playing} {display_bpm:.1} BPM │ {mode_icon} │ Master: {master} │ Link: {} peer{} │ Phase: {phase_bar} │ {sync_indicator}",
         state.link_peers,
         if state.link_peers == 1 { "" } else { "s" },
     )
@@ -222,6 +228,32 @@ mod tests {
         };
         let line = format_status_line(&state);
         assert!(line.contains("Link→CDJ"));
+    }
+
+    #[test]
+    fn status_line_slave_shows_link_bpm() {
+        // In slave mode, Link drives — display link_bpm, not prodjlink_bpm
+        let state = BridgeState {
+            sync_mode: SyncMode::Slave,
+            prodjlink_bpm: 0.0, // CDJ not connected / stale
+            link_bpm: 128.0,
+            ..BridgeState::default()
+        };
+        let line = format_status_line(&state);
+        assert!(line.contains("128.0 BPM"));
+        assert!(!line.contains("0.0 BPM"));
+    }
+
+    #[test]
+    fn status_line_master_shows_prodjlink_bpm() {
+        let state = BridgeState {
+            sync_mode: SyncMode::Master,
+            prodjlink_bpm: 130.0,
+            link_bpm: 120.0,
+            ..BridgeState::default()
+        };
+        let line = format_status_line(&state);
+        assert!(line.contains("130.0 BPM"));
     }
 
     #[test]

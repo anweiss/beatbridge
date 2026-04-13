@@ -115,7 +115,12 @@ impl BridgeConfig {
             FileConfig::default()
         };
 
-        Ok(Self::merge(cli, file_cfg))
+        let cfg = Self::merge(cli, file_cfg);
+        let errors = cfg.validate();
+        if !errors.is_empty() {
+            return Err(errors.join("; ").into());
+        }
+        Ok(cfg)
     }
 
     /// Three-way merge: CLI > file > defaults.
@@ -149,6 +154,30 @@ impl BridgeConfig {
                 .or(file.status_interval_ms)
                 .unwrap_or(DEFAULT_STATUS_INTERVAL_MS),
         }
+    }
+
+    /// Validate configuration values. Returns a list of errors.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.device_number == 0 || self.device_number > 6 {
+            errors.push(format!(
+                "device_number must be 1–6, got {}",
+                self.device_number
+            ));
+        }
+        if self.quantum <= 0.0 {
+            errors.push(format!("quantum must be positive, got {}", self.quantum));
+        }
+        if self.initial_bpm <= 0.0 {
+            errors.push(format!(
+                "initial_bpm must be positive, got {}",
+                self.initial_bpm
+            ));
+        }
+        if self.status_interval_ms == 0 {
+            errors.push("status_interval_ms must be > 0".to_string());
+        }
+        errors
     }
 }
 
@@ -413,5 +442,101 @@ mod tests {
         };
         let cfg = BridgeConfig::merge(cli, FileConfig::default());
         assert_eq!(cfg.interface.unwrap(), "172.16.0.1".parse::<Ipv4Addr>().unwrap());
+    }
+
+    // ================================================================
+    // BridgeConfig::validate
+    // ================================================================
+
+    #[test]
+    fn validate_defaults_pass() {
+        let cfg = BridgeConfig::merge(empty_cli(), FileConfig::default());
+        assert!(cfg.validate().is_empty());
+    }
+
+    #[test]
+    fn validate_device_number_zero() {
+        let cli = Cli {
+            device_number: Some(0),
+            ..empty_cli()
+        };
+        let cfg = BridgeConfig::merge(cli, FileConfig::default());
+        let errors = cfg.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("device_number"));
+    }
+
+    #[test]
+    fn validate_device_number_seven() {
+        let cli = Cli {
+            device_number: Some(7),
+            ..empty_cli()
+        };
+        let cfg = BridgeConfig::merge(cli, FileConfig::default());
+        let errors = cfg.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("device_number"));
+    }
+
+    #[test]
+    fn validate_device_number_valid_range() {
+        for n in 1..=6 {
+            let cli = Cli {
+                device_number: Some(n),
+                ..empty_cli()
+            };
+            let cfg = BridgeConfig::merge(cli, FileConfig::default());
+            assert!(cfg.validate().is_empty(), "device_number {n} should be valid");
+        }
+    }
+
+    #[test]
+    fn validate_zero_quantum() {
+        let cli = Cli {
+            quantum: Some(0.0),
+            ..empty_cli()
+        };
+        let cfg = BridgeConfig::merge(cli, FileConfig::default());
+        let errors = cfg.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("quantum"));
+    }
+
+    #[test]
+    fn validate_negative_bpm() {
+        let cli = Cli {
+            initial_bpm: Some(-10.0),
+            ..empty_cli()
+        };
+        let cfg = BridgeConfig::merge(cli, FileConfig::default());
+        let errors = cfg.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("initial_bpm"));
+    }
+
+    #[test]
+    fn validate_zero_status_interval() {
+        let cli = Cli {
+            status_interval_ms: Some(0),
+            ..empty_cli()
+        };
+        let cfg = BridgeConfig::merge(cli, FileConfig::default());
+        let errors = cfg.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("status_interval_ms"));
+    }
+
+    #[test]
+    fn validate_multiple_errors() {
+        let cli = Cli {
+            device_number: Some(0),
+            quantum: Some(-1.0),
+            initial_bpm: Some(0.0),
+            status_interval_ms: Some(0),
+            ..empty_cli()
+        };
+        let cfg = BridgeConfig::merge(cli, FileConfig::default());
+        let errors = cfg.validate();
+        assert_eq!(errors.len(), 4);
     }
 }
