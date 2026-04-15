@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::time::Instant;
 
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
 use ableton_link_rs::link::BasicLink;
-use prodjlink_rs::{BeatEvent, Bpm, DeviceNumber, DeviceType, DeviceUpdate, ProDjLink};
+use prodjlink_rs::{BeatEvent, Bpm, ChannelsOnAir, DeviceNumber, DeviceType, DeviceUpdate, ProDjLink};
 
 use crate::config::SyncMode;
 
@@ -31,6 +32,9 @@ pub struct BridgeState {
     pub is_playing: bool,
     pub sync_mode: SyncMode,
     pub master_device: Option<u8>,
+    /// Per-channel on-air status from the mixer (channel 1-based → on-air).
+    /// Empty if no mixer is present or no on-air packets received yet.
+    pub channels_on_air: HashMap<u8, bool>,
 }
 
 impl Default for BridgeState {
@@ -44,6 +48,7 @@ impl Default for BridgeState {
             is_playing: false,
             sync_mode: SyncMode::Master,
             master_device: None,
+            channels_on_air: HashMap::new(),
         }
     }
 }
@@ -68,6 +73,7 @@ impl BridgeEngine {
             is_playing: false,
             sync_mode,
             master_device: None,
+            channels_on_air: HashMap::new(),
         };
 
         let (state_tx, state_rx) = watch::channel(initial_state);
@@ -156,11 +162,12 @@ impl BridgeEngine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut beats_rx = pdl.subscribe_beats();
         let mut status_rx = pdl.subscribe_status();
+        let mut on_air_rx = pdl.subscribe_on_air();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         let mut last_playing = false;
         let mut last_beat_time = Instant::now() - PLAY_TIMEOUT;
-        // Play-state timeout: check periodically for beat silence
+        let mut channels_on_air: HashMap<u8, bool> = HashMap::new();
         let mut play_timeout_check = tokio::time::interval(std::time::Duration::from_millis(500));
 
         loop {
@@ -198,7 +205,7 @@ impl BridgeEngine {
                                     ).await;
                                 }
                             }
-                            self.publish_state(&pdl, &link);
+                            self.publish_state(&pdl, &link, &channels_on_air);
                         }
                         Ok(BeatEvent::PrecisePosition(_)) => {
                             // Precise position is informational; we sync on beats
@@ -226,7 +233,7 @@ impl BridgeEngine {
                                     debug!(playing, device = %status.device_number, "play state synced to link");
                                 }
                             }
-                            self.publish_state(&pdl, &link);
+                            self.publish_state(&pdl, &link, &channels_on_air);
                         }
                         Ok(DeviceUpdate::Mixer(_)) => {}
                         Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -238,6 +245,18 @@ impl BridgeEngine {
                         }
                     }
                 }
+                on_air_result = on_air_rx.recv() => {
+                    match on_air_result {
+                        Ok(on_air) => {
+                            Self::handle_on_air_update(&on_air, &mut channels_on_air);
+                            self.publish_state(&pdl, &link, &channels_on_air);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(skipped = n, "on-air channel lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {}
+                    }
+                }
                 _ = play_timeout_check.tick() => {
                     // If beats have stopped arriving, infer "stopped"
                     if last_playing && last_beat_time.elapsed() > PLAY_TIMEOUT {
@@ -247,7 +266,7 @@ impl BridgeEngine {
                         session.set_is_playing(false, time);
                         link.commit_app_session_state(session).await;
                         debug!("play state timeout — no beats received, inferring stopped");
-                        self.publish_state(&pdl, &link);
+                        self.publish_state(&pdl, &link, &channels_on_air);
                     }
                 }
                 _ = shutdown_rx.recv() => {
@@ -272,9 +291,11 @@ impl BridgeEngine {
         pdl: ProDjLink,
         mut link: BasicLink,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut on_air_rx = pdl.subscribe_on_air();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let mut last_link_bpm: f64 = link.capture_app_session_state().tempo();
         let mut last_playing = link.capture_app_session_state().is_playing();
+        let mut channels_on_air: HashMap<u8, bool> = HashMap::new();
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(20));
 
         loop {
@@ -304,7 +325,19 @@ impl BridgeEngine {
                         }
                     }
 
-                    self.publish_state(&pdl, &link);
+                    self.publish_state(&pdl, &link, &channels_on_air);
+                }
+                on_air_result = on_air_rx.recv() => {
+                    match on_air_result {
+                        Ok(on_air) => {
+                            Self::handle_on_air_update(&on_air, &mut channels_on_air);
+                            self.publish_state(&pdl, &link, &channels_on_air);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(skipped = n, "on-air channel lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {}
+                    }
                 }
                 _ = shutdown_rx.recv() => {
                     info!("shutdown signal received");
@@ -330,6 +363,7 @@ impl BridgeEngine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut beats_rx = pdl.subscribe_beats();
         let mut status_rx = pdl.subscribe_status();
+        let mut on_air_rx = pdl.subscribe_on_air();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         // Timestamps of our last writes — used to suppress echoes
@@ -337,6 +371,7 @@ impl BridgeEngine {
         let mut last_link_to_cdj = Instant::now() - std::time::Duration::from_secs(1);
         let mut last_playing = false;
         let mut last_beat_time = Instant::now() - PLAY_TIMEOUT;
+        let mut channels_on_air: HashMap<u8, bool> = HashMap::new();
 
         let mut link_poll = tokio::time::interval(tokio::time::Duration::from_millis(20));
         let mut play_timeout_check = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -382,7 +417,7 @@ impl BridgeEngine {
                                 // preventing it from being re-detected as a Link change
                                 prev_link_bpm = cdj_bpm;
                             }
-                            self.publish_state(&pdl, &link);
+                            self.publish_state(&pdl, &link, &channels_on_air);
                         }
                         Ok(BeatEvent::PrecisePosition(_)) => {}
                         Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -409,13 +444,25 @@ impl BridgeEngine {
                                     debug!(playing, "bidir: CDJ play state → Link");
                                 }
                             }
-                            self.publish_state(&pdl, &link);
+                            self.publish_state(&pdl, &link, &channels_on_air);
                         }
                         Ok(DeviceUpdate::Mixer(_)) => {}
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!(skipped = n, "status channel lagged (bidir)");
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                on_air_result = on_air_rx.recv() => {
+                    match on_air_result {
+                        Ok(on_air) => {
+                            Self::handle_on_air_update(&on_air, &mut channels_on_air);
+                            self.publish_state(&pdl, &link, &channels_on_air);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(skipped = n, "on-air channel lagged (bidir)");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {}
                     }
                 }
                 _ = link_poll.tick() => {
@@ -434,7 +481,7 @@ impl BridgeEngine {
                         vcdj.set_tempo(Bpm(link_bpm));
                     }
 
-                    self.publish_state(&pdl, &link);
+                    self.publish_state(&pdl, &link, &channels_on_air);
                 }
                 _ = play_timeout_check.tick() => {
                     if last_playing && last_beat_time.elapsed() > PLAY_TIMEOUT {
@@ -445,7 +492,7 @@ impl BridgeEngine {
                         link.commit_app_session_state(session).await;
                         last_cdj_to_link = Instant::now();
                         debug!("bidir: play state timeout — no beats, inferring stopped");
-                        self.publish_state(&pdl, &link);
+                        self.publish_state(&pdl, &link, &channels_on_air);
                     }
                 }
                 _ = shutdown_rx.recv() => {
@@ -464,6 +511,20 @@ impl BridgeEngine {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    /// Process an on-air update from the mixer and update local state.
+    fn handle_on_air_update(on_air: &ChannelsOnAir, channels: &mut HashMap<u8, bool>) {
+        *channels = on_air.channels.iter().map(|(&k, &v)| (k, v)).collect();
+        let active: Vec<u8> = channels.iter()
+            .filter(|(_, v)| **v)
+            .map(|(&k, _)| k)
+            .collect();
+        debug!(
+            mixer = %on_air.device_number,
+            on_air = ?active,
+            "channels on-air updated"
+        );
+    }
 
     /// Push the CDJ tempo into Link if it differs beyond epsilon.
     async fn sync_tempo_to_link(link: &mut BasicLink, cdj_bpm: f64) {
@@ -493,7 +554,7 @@ impl BridgeEngine {
     }
 
     /// Snapshot the current state and publish via the watch channel.
-    fn publish_state(&self, pdl: &ProDjLink, link: &BasicLink) {
+    fn publish_state(&self, pdl: &ProDjLink, link: &BasicLink, channels_on_air: &HashMap<u8, bool>) {
         let tm = pdl.virtual_cdj().tempo_master();
         let master_bpm = tm.master_tempo().0;
         let master_device = tm.master_device().map(|d| d.0);
@@ -510,6 +571,7 @@ impl BridgeEngine {
             is_playing: session.is_playing(),
             sync_mode: self.sync_mode,
             master_device,
+            channels_on_air: channels_on_air.clone(),
         };
 
         // Ignore send error — no receivers is fine
@@ -636,6 +698,7 @@ mod tests {
             is_playing: true,
             sync_mode: SyncMode::Master,
             master_device: Some(1),
+            channels_on_air: HashMap::new(),
         };
         engine.state_tx.send(new_state).unwrap();
         rx.changed().await.unwrap();
@@ -681,6 +744,7 @@ mod tests {
             is_playing: true,
             sync_mode: SyncMode::Bidirectional,
             master_device: Some(3),
+            channels_on_air: HashMap::new(),
         };
         let cloned = state.clone();
         assert_eq!(cloned.prodjlink_bpm, 128.0);

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 
@@ -62,8 +63,10 @@ pub fn format_status_line(state: &BridgeState) -> String {
         _ => state.prodjlink_bpm,
     };
 
+    let on_air_display = format_on_air(&state.channels_on_air);
+
     format!(
-        "  {playing} {display_bpm:.1} BPM │ {mode_icon} │ Master: {master} │ Link: {} peer{} │ Phase: {phase_bar} │ {sync_indicator}",
+        "  {playing} {display_bpm:.1} BPM │ {mode_icon} │ Master: {master} │ Link: {} peer{} │ Phase: {phase_bar} │ {on_air_display} │ {sync_indicator}",
         state.link_peers,
         if state.link_peers == 1 { "" } else { "s" },
     )
@@ -87,6 +90,28 @@ pub fn render_phase_bar(phase: f64, quantum: f64) -> String {
     }
     bar.push(']');
     bar
+}
+
+/// Render on-air channel indicators like `Air: 1·2·-·4` or `Air: ---` if empty.
+/// Channels are displayed in order 1–N. On-air channels show their number,
+/// off-air channels show `-`.
+pub fn format_on_air(channels: &HashMap<u8, bool>) -> String {
+    if channels.is_empty() {
+        return "Air: ---".to_string();
+    }
+
+    let max_ch = channels.keys().copied().max().unwrap_or(0);
+    let indicators: Vec<String> = (1..=max_ch)
+        .map(|ch| {
+            if channels.get(&ch).copied().unwrap_or(false) {
+                ch.to_string()
+            } else {
+                "-".to_string()
+            }
+        })
+        .collect();
+
+    format!("Air: {}", indicators.join("·"))
 }
 
 #[cfg(test)]
@@ -177,6 +202,7 @@ mod tests {
             is_playing: true,
             sync_mode: SyncMode::Master,
             master_device: Some(1),
+            channels_on_air: HashMap::new(),
         };
         let line = format_status_line(&state);
         assert!(line.contains("128.0 BPM"));
@@ -288,5 +314,56 @@ mod tests {
         };
         let line = format_status_line(&state);
         assert!(line.contains("0 peers")); // plural for 0
+    }
+
+    // ================================================================
+    // format_on_air
+    // ================================================================
+
+    #[test]
+    fn on_air_empty_channels() {
+        assert_eq!(format_on_air(&HashMap::new()), "Air: ---");
+    }
+
+    #[test]
+    fn on_air_all_four_active() {
+        let channels: HashMap<u8, bool> = [(1, true), (2, true), (3, true), (4, true)].into();
+        assert_eq!(format_on_air(&channels), "Air: 1·2·3·4");
+    }
+
+    #[test]
+    fn on_air_channels_1_and_3() {
+        let channels: HashMap<u8, bool> = [(1, true), (2, false), (3, true), (4, false)].into();
+        assert_eq!(format_on_air(&channels), "Air: 1·-·3·-");
+    }
+
+    #[test]
+    fn on_air_all_off() {
+        let channels: HashMap<u8, bool> = [(1, false), (2, false), (3, false), (4, false)].into();
+        assert_eq!(format_on_air(&channels), "Air: -·-·-·-");
+    }
+
+    #[test]
+    fn on_air_six_channel_mixer() {
+        let channels: HashMap<u8, bool> = [(1, true), (2, true), (3, false), (4, false), (5, true), (6, false)].into();
+        assert_eq!(format_on_air(&channels), "Air: 1·2·-·-·5·-");
+    }
+
+    #[test]
+    fn status_line_shows_on_air() {
+        let channels: HashMap<u8, bool> = [(1, true), (2, false), (3, true), (4, false)].into();
+        let state = BridgeState {
+            channels_on_air: channels,
+            ..BridgeState::default()
+        };
+        let line = format_status_line(&state);
+        assert!(line.contains("Air: 1·-·3·-"));
+    }
+
+    #[test]
+    fn status_line_no_mixer_shows_dashes() {
+        let state = BridgeState::default();
+        let line = format_status_line(&state);
+        assert!(line.contains("Air: ---"));
     }
 }
