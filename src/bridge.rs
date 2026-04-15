@@ -112,7 +112,13 @@ impl BridgeEngine {
                     info!(bpm = initial_bpm, "Claimed tempo master on DJ Link network");
                 }
             }
-            SyncMode::Master => {}
+            SyncMode::Master => {
+                // Enable status broadcasting so CDJ-3000 and other modern
+                // hardware recognises us as a full network participant and
+                // sends back full status packets (type 0x0a).
+                let vcdj = pdl.virtual_cdj();
+                vcdj.set_sending_status(true).await;
+            }
         }
 
         if !can_phase_sync(self.quantum) {

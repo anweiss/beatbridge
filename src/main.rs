@@ -11,9 +11,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load config (CLI args + optional TOML file)
     let cfg = config::BridgeConfig::load()?;
 
-    // Initialize tracing/logging
+    // Initialize tracing/logging — RUST_LOG env var takes priority over config
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(&cfg.log_level))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level)),
+        )
         .init();
 
     info!("BeatBridge v{}", env!("CARGO_PKG_VERSION"));
