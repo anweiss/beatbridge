@@ -93,24 +93,115 @@ BeatBridge prints a compact, single-line status that updates in place — ideal 
 
 BeatBridge is designed to run headless on a Raspberry Pi connected to the same network as your DJ equipment.
 
-### Cross-compile for aarch64 (from macOS/Linux x86)
+### Cross-compile for aarch64 (from macOS or Linux x86_64)
+
+BeatBridge depends on [cpal](https://github.com/RustAudioGroup/cpal) (via `ableton-link-rs` → `rodio`), which links against ALSA on Linux. Cross-compiling requires a cross-toolchain **and** the ALSA development libraries for the target architecture.
+
+#### 1. Install the Rust target
 
 ```bash
-# Install the cross-compilation target
 rustup target add aarch64-unknown-linux-gnu
+```
 
-# Install a linker (macOS with Homebrew)
-brew install messense/macos-cross-toolchains/aarch64-unknown-linux-gnu
+#### 2. Install the cross-toolchain
 
-# Build
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-unknown-linux-gnu-gcc \
-  cargo build --release --target aarch64-unknown-linux-gnu
+**macOS (Homebrew):**
+
+```bash
+brew tap messense/macos-cross-toolchains
+brew install aarch64-unknown-linux-gnu
+```
+
+**Linux (Debian/Ubuntu):**
+
+```bash
+sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+```
+
+#### 3. Obtain aarch64 ALSA dev libraries
+
+The `cpal` crate requires `libasound2-dev` headers and libraries for the target. You can get these from a Raspberry Pi or by downloading the arm64 package:
+
+**Option A — Copy from the Pi:**
+
+```bash
+# On the Raspberry Pi, install the dev package if not already present
+sudo apt install libasound2-dev
+
+# From your build machine, copy the required files
+mkdir -p sysroot/usr/lib/aarch64-linux-gnu sysroot/usr/include
+scp pi@<pi-ip>:/usr/lib/aarch64-linux-gnu/libasound.so* sysroot/usr/lib/aarch64-linux-gnu/
+scp pi@<pi-ip>:/usr/lib/aarch64-linux-gnu/libasound.a sysroot/usr/lib/aarch64-linux-gnu/
+scp -r pi@<pi-ip>:/usr/include/alsa sysroot/usr/include/
+```
+
+**Option B — Download the arm64 .deb package directly:**
+
+```bash
+mkdir -p sysroot
+# Download the arm64 libasound2-dev package (check the Pi's Debian version)
+apt download libasound2-dev:arm64 2>/dev/null || \
+  wget http://ports.ubuntu.com/pool/main/a/alsa-lib/libasound2-dev_1.2.8-1build1_arm64.deb
+dpkg-deb -x libasound2-dev_*_arm64.deb sysroot/
+
+# You'll also need the runtime library
+apt download libasound2:arm64 2>/dev/null || \
+  wget http://ports.ubuntu.com/pool/main/a/alsa-lib/libasound2_1.2.8-1build1_arm64.deb
+dpkg-deb -x libasound2_*_arm64.deb sysroot/
+```
+
+**Option C — Use [cross](https://github.com/cross-rs/cross) (easiest, requires Docker):**
+
+```bash
+cargo install cross
+cross build --release --target aarch64-unknown-linux-gnu
+```
+
+`cross` handles the entire sysroot and toolchain automatically via Docker. Skip to [Deploy to the Pi](#deploy-to-the-pi) if using this method.
+
+#### 4. Build
+
+Point `pkg-config` and the linker at your sysroot and toolchain:
+
+```bash
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+export PKG_CONFIG_SYSROOT_DIR="$(pwd)/sysroot"
+export PKG_CONFIG_PATH="$(pwd)/sysroot/usr/lib/aarch64-linux-gnu/pkgconfig"
+export PKG_CONFIG_ALLOW_CROSS=1
+
+cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+The binary will be at `target/aarch64-unknown-linux-gnu/release/beatbridge`.
+
+> **Tip:** Add these settings to `.cargo/config.toml` to avoid repeating them:
+>
+> ```toml
+> [target.aarch64-unknown-linux-gnu]
+> linker = "aarch64-linux-gnu-gcc"
+> ```
+
+#### Deploy to the Pi
+
+```bash
+# Copy binary and config
+scp target/aarch64-unknown-linux-gnu/release/beatbridge pi@<pi-ip>:/usr/local/bin/
+scp beatbridge.toml pi@<pi-ip>:/etc/beatbridge.toml
+
+# On the Pi — install the ALSA runtime if not already present
+ssh pi@<pi-ip> 'sudo apt install -y libasound2'
 ```
 
 ### Or build natively on the Pi
 
 ```bash
-# On the Raspberry Pi
+# Install build dependencies
+sudo apt install build-essential libasound2-dev
+
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Build
 cargo build --release
 ```
 
