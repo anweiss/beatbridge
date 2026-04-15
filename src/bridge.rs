@@ -16,6 +16,10 @@ const TEMPO_EPSILON: f64 = 0.05;
 /// (bidirectional mode echo-loop suppression).
 const ECHO_GUARD_MS: u128 = 100;
 
+/// If no beat arrives within this window, infer "stopped".
+/// CDJs at 60 BPM send beats every 1000ms; 2s gives generous headroom.
+const PLAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Current bridge state exposed for status display.
 #[derive(Debug, Clone)]
 pub struct BridgeState {
@@ -155,6 +159,9 @@ impl BridgeEngine {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         let mut last_playing = false;
+        let mut last_beat_time = Instant::now() - PLAY_TIMEOUT;
+        // Play-state timeout: check periodically for beat silence
+        let mut play_timeout_check = tokio::time::interval(std::time::Duration::from_millis(500));
 
         loop {
             tokio::select! {
@@ -164,6 +171,7 @@ impl BridgeEngine {
                             let master_dev = pdl.virtual_cdj().tempo_master().master_device();
                             // Only sync from the tempo master player
                             if master_dev.is_some_and(|d| d == beat.device_number) {
+                                last_beat_time = Instant::now();
                                 let cdj_bpm = beat.effective_tempo();
                                 Self::sync_tempo_to_link(&mut link, cdj_bpm).await;
 
@@ -228,6 +236,18 @@ impl BridgeEngine {
                             info!("status channel closed, stopping bridge");
                             break;
                         }
+                    }
+                }
+                _ = play_timeout_check.tick() => {
+                    // If beats have stopped arriving, infer "stopped"
+                    if last_playing && last_beat_time.elapsed() > PLAY_TIMEOUT {
+                        last_playing = false;
+                        let time = link.clock().micros();
+                        let mut session = link.capture_app_session_state();
+                        session.set_is_playing(false, time);
+                        link.commit_app_session_state(session).await;
+                        debug!("play state timeout — no beats received, inferring stopped");
+                        self.publish_state(&pdl, &link);
                     }
                 }
                 _ = shutdown_rx.recv() => {
@@ -316,8 +336,10 @@ impl BridgeEngine {
         let mut last_cdj_to_link = Instant::now() - std::time::Duration::from_secs(1);
         let mut last_link_to_cdj = Instant::now() - std::time::Duration::from_secs(1);
         let mut last_playing = false;
+        let mut last_beat_time = Instant::now() - PLAY_TIMEOUT;
 
         let mut link_poll = tokio::time::interval(tokio::time::Duration::from_millis(20));
+        let mut play_timeout_check = tokio::time::interval(std::time::Duration::from_millis(500));
         let mut prev_link_bpm: f64 = link.capture_app_session_state().tempo();
 
         loop {
@@ -331,8 +353,19 @@ impl BridgeEngine {
                             }
                             let master_dev = pdl.virtual_cdj().tempo_master().master_device();
                             if master_dev.is_some_and(|d| d == beat.device_number) {
+                                last_beat_time = Instant::now();
                                 let cdj_bpm = beat.effective_tempo();
                                 Self::sync_tempo_to_link(&mut link, cdj_bpm).await;
+
+                                // Infer play state from beats
+                                if !last_playing {
+                                    last_playing = true;
+                                    let time = link.clock().micros();
+                                    let mut session = link.capture_app_session_state();
+                                    session.set_is_playing(true, time);
+                                    link.commit_app_session_state(session).await;
+                                    debug!(device = %beat.device_number, "bidir: play state inferred from beat");
+                                }
 
                                 // Only sync phase from CDJs — not mixers.
                                 // Skip when quantum != 4 (CDJ only has 4-beat bars).
@@ -402,6 +435,18 @@ impl BridgeEngine {
                     }
 
                     self.publish_state(&pdl, &link);
+                }
+                _ = play_timeout_check.tick() => {
+                    if last_playing && last_beat_time.elapsed() > PLAY_TIMEOUT {
+                        last_playing = false;
+                        let time = link.clock().micros();
+                        let mut session = link.capture_app_session_state();
+                        session.set_is_playing(false, time);
+                        link.commit_app_session_state(session).await;
+                        last_cdj_to_link = Instant::now();
+                        debug!("bidir: play state timeout — no beats, inferring stopped");
+                        self.publish_state(&pdl, &link);
+                    }
                 }
                 _ = shutdown_rx.recv() => {
                     info!("shutdown signal received");

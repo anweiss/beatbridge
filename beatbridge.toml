@@ -6,7 +6,7 @@
 
 # Virtual CDJ identity on the DJ Link network
 device_name = "beatbridge"
-device_number = 3
+device_number = 5
 
 # Ableton Link quantum (beats per phase)
 quantum = 4.0
