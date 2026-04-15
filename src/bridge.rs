@@ -5,7 +5,7 @@ use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
 use ableton_link_rs::link::BasicLink;
-use prodjlink_rs::{BeatEvent, Bpm, ChannelsOnAir, DeviceNumber, DeviceType, DeviceUpdate, ProDjLink};
+use prodjlink_rs::{BeatEvent, Bpm, ChannelsOnAir, DeviceNumber, DeviceType, DeviceUpdate, ProDjLink, TempoMasterEvent};
 
 use crate::config::SyncMode;
 
@@ -163,7 +163,12 @@ impl BridgeEngine {
         let mut beats_rx = pdl.subscribe_beats();
         let mut status_rx = pdl.subscribe_status();
         let mut on_air_rx = pdl.subscribe_on_air();
+        let mut tempo_rx = pdl.virtual_cdj().tempo_master().subscribe();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        // Enable auto-negotiate so the VirtualCdj participates in the
+        // master handoff protocol (Baroque dance) with other DJ Link devices.
+        pdl.virtual_cdj().set_auto_negotiate(true).await;
 
         let mut last_playing = false;
         let mut last_beat_time = Instant::now() - PLAY_TIMEOUT;
@@ -257,6 +262,24 @@ impl BridgeEngine {
                         Err(broadcast::error::RecvError::Closed) => {}
                     }
                 }
+                tempo_result = tempo_rx.recv() => {
+                    match tempo_result {
+                        Ok(TempoMasterEvent::WeBecameMaster) => {
+                            info!("handoff: we became master on DJ Link network");
+                        }
+                        Ok(TempoMasterEvent::WeResignedMaster) => {
+                            info!("handoff: we resigned master on DJ Link network");
+                        }
+                        Ok(TempoMasterEvent::MasterChanged { new, .. }) => {
+                            debug!(new_master = ?new, "master changed");
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(skipped = n, "tempo master channel lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {}
+                    }
+                }
                 _ = play_timeout_check.tick() => {
                     // If beats have stopped arriving, infer "stopped"
                     if last_playing && last_beat_time.elapsed() > PLAY_TIMEOUT {
@@ -292,11 +315,14 @@ impl BridgeEngine {
         mut link: BasicLink,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut on_air_rx = pdl.subscribe_on_air();
+        let mut tempo_rx = pdl.virtual_cdj().tempo_master().subscribe();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let mut last_link_bpm: f64 = link.capture_app_session_state().tempo();
         let mut last_playing = link.capture_app_session_state().is_playing();
         let mut channels_on_air: HashMap<u8, bool> = HashMap::new();
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(20));
+
+        pdl.virtual_cdj().set_auto_negotiate(true).await;
 
         loop {
             tokio::select! {
@@ -339,6 +365,24 @@ impl BridgeEngine {
                         Err(broadcast::error::RecvError::Closed) => {}
                     }
                 }
+                tempo_result = tempo_rx.recv() => {
+                    match tempo_result {
+                        Ok(TempoMasterEvent::WeBecameMaster) => {
+                            info!("handoff: we became master on DJ Link network");
+                        }
+                        Ok(TempoMasterEvent::WeResignedMaster) => {
+                            info!("handoff: we resigned master on DJ Link network");
+                        }
+                        Ok(TempoMasterEvent::MasterChanged { new, .. }) => {
+                            debug!(new_master = ?new, "master changed");
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(skipped = n, "tempo master channel lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {}
+                    }
+                }
                 _ = shutdown_rx.recv() => {
                     info!("shutdown signal received");
                     break;
@@ -364,7 +408,10 @@ impl BridgeEngine {
         let mut beats_rx = pdl.subscribe_beats();
         let mut status_rx = pdl.subscribe_status();
         let mut on_air_rx = pdl.subscribe_on_air();
+        let mut tempo_rx = pdl.virtual_cdj().tempo_master().subscribe();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        pdl.virtual_cdj().set_auto_negotiate(true).await;
 
         // Timestamps of our last writes — used to suppress echoes
         let mut last_cdj_to_link = Instant::now() - std::time::Duration::from_secs(1);
@@ -461,6 +508,24 @@ impl BridgeEngine {
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!(skipped = n, "on-air channel lagged (bidir)");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {}
+                    }
+                }
+                tempo_result = tempo_rx.recv() => {
+                    match tempo_result {
+                        Ok(TempoMasterEvent::WeBecameMaster) => {
+                            info!("handoff: we became master on DJ Link network");
+                        }
+                        Ok(TempoMasterEvent::WeResignedMaster) => {
+                            info!("handoff: we resigned master on DJ Link network");
+                        }
+                        Ok(TempoMasterEvent::MasterChanged { new, .. }) => {
+                            debug!(new_master = ?new, "bidir: master changed");
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(skipped = n, "tempo master channel lagged (bidir)");
                         }
                         Err(broadcast::error::RecvError::Closed) => {}
                     }
