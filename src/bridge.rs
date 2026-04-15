@@ -161,6 +161,18 @@ impl BridgeEngine {
                                 let cdj_bpm = beat.effective_tempo();
                                 Self::sync_tempo_to_link(&mut link, cdj_bpm).await;
 
+                                // Infer play state from beats — CDJ-3000 and
+                                // other devices that don't send status packets
+                                // still send beats while playing.
+                                if !last_playing {
+                                    last_playing = true;
+                                    let time = link.clock().micros();
+                                    let mut session = link.capture_app_session_state();
+                                    session.set_is_playing(true, time);
+                                    link.commit_app_session_state(session).await;
+                                    debug!(device = %beat.device_number, "play state inferred from beat");
+                                }
+
                                 // Only sync phase from CDJs/players — mixer
                                 // beat_within_bar is not musically meaningful.
                                 // Also skip when quantum != 4 (CDJ only has 4-beat bars).
