@@ -6,8 +6,8 @@ description = "Bridge between Pioneer Pro DJ Link and Ableton Link — sync temp
 license = "MIT"
 
 [dependencies]
-prodjlink-rs = { path = "../prodjlink-rs" }
-ableton-link-rs = { path = "../ableton-link-rs" }
+prodjlink-rs = { git = "https://github.com/anweiss/prodjlink-rs.git", branch = "main" }
+ableton-link-rs = { git = "https://github.com/anweiss/ableton-link-rs.git", branch = "main" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
