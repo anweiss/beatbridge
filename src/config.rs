@@ -19,7 +19,11 @@ pub enum SyncMode {
 /// CLI arguments — all config fields are `Option` so we can distinguish
 /// "user explicitly passed this" from "defaulted by clap".
 #[derive(Parser, Debug)]
-#[command(name = "beatbridge", version, about = "Bridge Pioneer Pro DJ Link ↔ Ableton Link")]
+#[command(
+    name = "beatbridge",
+    version,
+    about = "Bridge Pioneer Pro DJ Link ↔ Ableton Link"
+)]
 pub struct Cli {
     /// Network interface IP address for Pro DJ Link
     #[arg(short, long)]
@@ -137,10 +141,7 @@ impl BridgeConfig {
                 .or(file.device_number)
                 .unwrap_or(DEFAULT_DEVICE_NUMBER),
             quantum: cli.quantum.or(file.quantum).unwrap_or(DEFAULT_QUANTUM),
-            sync_mode: cli
-                .sync_mode
-                .or(file.sync_mode)
-                .unwrap_or_default(),
+            sync_mode: cli.sync_mode.or(file.sync_mode).unwrap_or_default(),
             log_level: cli
                 .log_level
                 .or(file.log_level)
@@ -230,7 +231,10 @@ mod tests {
             status_interval_ms = 250
         "#;
         let cfg: FileConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.interface.unwrap(), "192.168.1.10".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(
+            cfg.interface.unwrap(),
+            "192.168.1.10".parse::<Ipv4Addr>().unwrap()
+        );
         assert_eq!(cfg.device_name.unwrap(), "mybridge");
         assert_eq!(cfg.device_number.unwrap(), 3);
         assert_eq!(cfg.quantum.unwrap(), 8.0);
@@ -336,7 +340,10 @@ mod tests {
             status_interval_ms: Some(250),
         };
         let cfg = BridgeConfig::merge(empty_cli(), file);
-        assert_eq!(cfg.interface.unwrap(), "10.0.0.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(
+            cfg.interface.unwrap(),
+            "10.0.0.1".parse::<Ipv4Addr>().unwrap()
+        );
         assert_eq!(cfg.device_name, "file-bridge");
         assert_eq!(cfg.device_number, 2);
         assert_eq!(cfg.quantum, 8.0);
@@ -370,7 +377,10 @@ mod tests {
             status_interval_ms: Some(250),
         };
         let cfg = BridgeConfig::merge(cli, file);
-        assert_eq!(cfg.interface.unwrap(), "192.168.1.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(
+            cfg.interface.unwrap(),
+            "192.168.1.1".parse::<Ipv4Addr>().unwrap()
+        );
         assert_eq!(cfg.device_name, "cli-bridge");
         assert_eq!(cfg.device_number, 3);
         assert_eq!(cfg.quantum, 16.0);
@@ -441,7 +451,10 @@ mod tests {
             ..empty_cli()
         };
         let cfg = BridgeConfig::merge(cli, FileConfig::default());
-        assert_eq!(cfg.interface.unwrap(), "172.16.0.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(
+            cfg.interface.unwrap(),
+            "172.16.0.1".parse::<Ipv4Addr>().unwrap()
+        );
     }
 
     // ================================================================
@@ -486,7 +499,10 @@ mod tests {
                 ..empty_cli()
             };
             let cfg = BridgeConfig::merge(cli, FileConfig::default());
-            assert!(cfg.validate().is_empty(), "device_number {n} should be valid");
+            assert!(
+                cfg.validate().is_empty(),
+                "device_number {n} should be valid"
+            );
         }
     }
 

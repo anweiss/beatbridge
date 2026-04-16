@@ -345,7 +345,15 @@ mod tests {
 
     #[test]
     fn on_air_six_channel_mixer() {
-        let channels: HashMap<u8, bool> = [(1, true), (2, true), (3, false), (4, false), (5, true), (6, false)].into();
+        let channels: HashMap<u8, bool> = [
+            (1, true),
+            (2, true),
+            (3, false),
+            (4, false),
+            (5, true),
+            (6, false),
+        ]
+        .into();
         assert_eq!(format_on_air(&channels), "Air: 1·2·-·-·5·-");
     }
 

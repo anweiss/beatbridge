@@ -5,7 +5,10 @@ use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
 use ableton_link_rs::link::BasicLink;
-use prodjlink_rs::{BeatEvent, Bpm, ChannelsOnAir, DeviceNumber, DeviceType, DeviceUpdate, ProDjLink, TempoMasterEvent};
+use prodjlink_rs::{
+    BeatEvent, Bpm, ChannelsOnAir, DeviceNumber, DeviceType, DeviceUpdate, ProDjLink,
+    TempoMasterEvent,
+};
 
 use crate::config::SyncMode;
 
@@ -580,7 +583,8 @@ impl BridgeEngine {
     /// Process an on-air update from the mixer and update local state.
     fn handle_on_air_update(on_air: &ChannelsOnAir, channels: &mut HashMap<u8, bool>) {
         *channels = on_air.channels.iter().map(|(&k, &v)| (k, v)).collect();
-        let active: Vec<u8> = channels.iter()
+        let active: Vec<u8> = channels
+            .iter()
             .filter(|(_, v)| **v)
             .map(|(&k, _)| k)
             .collect();
@@ -619,7 +623,12 @@ impl BridgeEngine {
     }
 
     /// Snapshot the current state and publish via the watch channel.
-    fn publish_state(&self, pdl: &ProDjLink, link: &BasicLink, channels_on_air: &HashMap<u8, bool>) {
+    fn publish_state(
+        &self,
+        pdl: &ProDjLink,
+        link: &BasicLink,
+        channels_on_air: &HashMap<u8, bool>,
+    ) {
         let tm = pdl.virtual_cdj().tempo_master();
         let master_bpm = tm.master_tempo().0;
         let master_device = tm.master_device().map(|d| d.0);
